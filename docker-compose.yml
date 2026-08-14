@@ -7,6 +7,7 @@ services:
         ANDROID_API: "${ANDROID_API:-auto}"
         SYSTEM_IMAGE_TAG: "${SYSTEM_IMAGE_TAG:-google_apis}"
         ABI: "x86_64"
+        SDK_CHANNEL: "${SDK_CHANNEL:-0}"
     image: homelab/android-emulator:${ANDROID_API:-auto}
     container_name: android-emulator
     devices:
