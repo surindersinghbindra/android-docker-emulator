@@ -1,0 +1,13 @@
+# Local config — contains your Tailscale IP and host-specific tuning.
+# Only .env.example belongs in git.
+.env
+
+# Anything the emulator or SDK might spill into the project dir
+*.avd/
+.android/
+*.log
+bld/
+
+# OS noise
+.DS_Store
+Thumbs.db

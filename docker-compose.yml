@@ -1,0 +1,33 @@
+services:
+  android-emulator:
+    build:
+      context: .
+      args:
+        # API 37 = Android 17. Change here to rebuild on a different release.
+        ANDROID_API: "${ANDROID_API:-37}"
+        SYSTEM_IMAGE_TAG: "${SYSTEM_IMAGE_TAG:-google_apis}"
+        ABI: "x86_64"
+    image: homelab/android-emulator:api${ANDROID_API:-37}
+    container_name: android-emulator
+    devices:
+      - /dev/kvm
+    shm_size: "2gb"
+    environment:
+      AVD_NAME: "homelab_api${ANDROID_API:-37}"
+      DEVICE_PROFILE: "${DEVICE_PROFILE:-pixel_6}"
+      RAM_MB: "${RAM_MB:-4096}"
+      CORES: "${CORES:-4}"
+      DATA_MB: "${DATA_MB:-8192}"
+      GPU_MODE: "${GPU_MODE:-swiftshader_indirect}"
+    ports:
+      # BIND_ADDR must be your Tailscale IP (100.x.y.z) so ADB is reachable
+      # ONLY over the tailnet, never from the LAN or the internet.
+      - "${BIND_ADDR:-127.0.0.1}:5555:5585"   # adbd  -> adb connect host:5555
+      - "${BIND_ADDR:-127.0.0.1}:5554:5584"   # telnet console (optional)
+    volumes:
+      - avd-data:/home/android/.android
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  avd-data:
