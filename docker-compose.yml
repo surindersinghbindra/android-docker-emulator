@@ -3,17 +3,17 @@ services:
     build:
       context: .
       args:
-        # API 37 = Android 17. Change here to rebuild on a different release.
-        ANDROID_API: "${ANDROID_API:-37}"
+        # 'auto' = newest stable API. Or pin a number, e.g. 36 (Android 16).
+        ANDROID_API: "${ANDROID_API:-auto}"
         SYSTEM_IMAGE_TAG: "${SYSTEM_IMAGE_TAG:-google_apis}"
         ABI: "x86_64"
-    image: homelab/android-emulator:api${ANDROID_API:-37}
+    image: homelab/android-emulator:${ANDROID_API:-auto}
     container_name: android-emulator
     devices:
       - /dev/kvm
     shm_size: "2gb"
     environment:
-      AVD_NAME: "homelab_api${ANDROID_API:-37}"
+      # AVD_NAME left unset -> entrypoint derives it from the resolved API level.
       DEVICE_PROFILE: "${DEVICE_PROFILE:-pixel_6}"
       RAM_MB: "${RAM_MB:-4096}"
       CORES: "${CORES:-4}"

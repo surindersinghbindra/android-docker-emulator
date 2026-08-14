@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The actual integer API level was resolved and recorded at build time.
+ANDROID_API="$(cat /etc/android-api 2>/dev/null || echo unknown)"
+
 AVD_NAME="${AVD_NAME:-homelab_api${ANDROID_API}}"
 DEVICE_PROFILE="${DEVICE_PROFILE:-pixel_6}"
 RAM_MB="${RAM_MB:-4096}"

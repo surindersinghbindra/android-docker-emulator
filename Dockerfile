@@ -8,9 +8,13 @@
 FROM ubuntu:24.04
 
 # ---- Which Android release to bake in -------------------------------------
-# API 37 = Android 17 (Cinnamon Bun). Override at build time, e.g.
-#   docker compose build --build-arg ANDROID_API=36
-ARG ANDROID_API=37
+# ANDROID_API=auto  -> install the newest STABLE platform sdkmanager offers.
+# ANDROID_API=36    -> pin a specific level (36 = Android 16 "Baklava", stable).
+# NOTE: API 37 (Android 17) is still a PREVIEW release; its google_apis x86_64
+# image currently ships only as a 16 KB-page variant on the non-stable channel,
+# so a plain "platforms;android-37" install fails with "Failed to find package".
+# Stick to 'auto' or a stable number unless you deliberately want the preview.
+ARG ANDROID_API=auto
 # google_apis            -> Google Play services, rootable via `adb root`
 # google_apis_playstore  -> adds Play Store, but NOT rootable
 # aosp_atd / google_atd  -> stripped-down, much faster, no UI apps
@@ -51,20 +55,40 @@ RUN set -eux; \
     "$ANDROID_SDK_ROOT/cmdline-tools/bootstrap/bin/sdkmanager" "cmdline-tools;latest" > /dev/null; \
     rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/bootstrap"
 
-# Re-accept licenses with the upgraded tools, then pull the official bits.
+# Re-accept licenses, resolve the API level, then pull the official bits.
+# The resolved integer is written to /etc/android-api so the entrypoint can
+# read it back regardless of whether 'auto' or a number was requested.
 RUN set -eux; \
     yes | sdkmanager --licenses > /dev/null; \
+    if [ "$ANDROID_API" = "auto" ]; then \
+      # Newest STABLE platform: list stable channel (0), take the highest android-NN.
+      API="$(sdkmanager --list --channel=0 2>/dev/null \
+              | grep -oE 'platforms;android-[0-9]+' \
+              | grep -oE '[0-9]+$' | sort -n | tail -1)"; \
+      [ -n "$API" ] || { echo 'Could not resolve a stable API level'; exit 1; }; \
+    else \
+      API="$ANDROID_API"; \
+    fi; \
+    echo "Resolved ANDROID_API=$API"; \
+    IMG="system-images;android-${API};${SYSTEM_IMAGE_TAG};${ABI}"; \
+    # Fail early with a clear message if that exact image isn't published.
+    if ! sdkmanager --list --channel=0 2>/dev/null | grep -qF "$IMG"; then \
+      echo "ERROR: '$IMG' not on the stable channel."; \
+      echo "Available ${SYSTEM_IMAGE_TAG} ${ABI} images:"; \
+      sdkmanager --list --channel=0 2>/dev/null \
+        | grep -E "system-images;android-[0-9]+;${SYSTEM_IMAGE_TAG};${ABI}" | sort -u; \
+      exit 1; \
+    fi; \
     sdkmanager \
       "platform-tools" \
       "emulator" \
-      "platforms;android-${ANDROID_API}" \
-      "system-images;android-${ANDROID_API};${SYSTEM_IMAGE_TAG};${ABI}" \
+      "platforms;android-${API}" \
+      "$IMG" \
     > /dev/null; \
+    echo "$API" > /etc/android-api; \
     sdkmanager --list_installed
 
-# Record what was baked in so the entrypoint can build the AVD from it.
-ENV ANDROID_API=${ANDROID_API} \
-    SYSTEM_IMAGE_TAG=${SYSTEM_IMAGE_TAG} \
+ENV SYSTEM_IMAGE_TAG=${SYSTEM_IMAGE_TAG} \
     ABI=${ABI}
 
 # ---- Unprivileged runtime user -------------------------------------------
