@@ -8,22 +8,24 @@
 FROM ubuntu:24.04
 
 # ---- Which Android release to bake in -------------------------------------
-# ANDROID_API=auto  -> install the newest STABLE platform sdkmanager offers.
-# ANDROID_API=36    -> pin a specific level (36 = Android 16 "Baklava", stable).
-# NOTE: API 37 (Android 17) is still a PREVIEW release; its google_apis x86_64
-# image currently ships only as a 16 KB-page variant on the non-stable channel,
-# so a plain "platforms;android-37" install fails with "Failed to find package".
-# Stick to 'auto' or a stable number unless you deliberately want the preview.
-ARG ANDROID_API=auto
+# The value must match a package name exactly as `sdkmanager` lists it, which
+# is the part AFTER "android-". On the STABLE channel that's a bare integer
+# (e.g. 36). On PREVIEW channels it carries a minor version (e.g. 37.0, 37.1).
+# See the README ("Checking what's available") for the one-liner that prints
+# the exact token to use.
+#   ANDROID_API=37.0  -> Android 17 (CinnamonBun) preview  [default]
+#   ANDROID_API=36    -> Android 16 (Baklava) stable
+#   ANDROID_API=auto  -> newest on the selected channel
+ARG ANDROID_API=37.0
 # google_apis            -> Google Play services, rootable via `adb root`
 # google_apis_playstore  -> adds Play Store, but NOT rootable
 # aosp_atd / google_atd  -> stripped-down, much faster, no UI apps
 ARG SYSTEM_IMAGE_TAG=google_apis
 ARG ABI=x86_64
-# SDK channel to search: 0=stable (default), 1=beta, 2=dev, 3=canary.
-# API 37 (Android 17) x86_64 images live on a preview channel, so pulling
-# them requires SDK_CHANNEL=3. Leave at 0 for a stable, official build.
-ARG SDK_CHANNEL=0
+# SDK channel to search: 0=stable, 1=beta, 2=dev, 3=canary.
+# Preview releases (e.g. 37.x) live on canary, so this defaults to 3 to match
+# the default ANDROID_API above. Set to 0 when pinning a stable version.
+ARG SDK_CHANNEL=3
 
 # Bootstrap copy of cmdline-tools. It immediately upgrades itself to
 # "cmdline-tools;latest" below, so this pinned build number only has to be
@@ -66,10 +68,12 @@ RUN set -eux; \
     yes | sdkmanager --licenses > /dev/null; \
     CH="--channel=${SDK_CHANNEL}"; \
     if [ "$ANDROID_API" = "auto" ]; then \
-      # Newest platform on the chosen channel; highest android-NN wins.
+      # Newest platform on the chosen channel. Handles bare integers (36) and
+      # preview tokens with minor/beta suffixes (37.0, 37.2-beta2) via sort -V.
       API="$(sdkmanager --list $CH 2>/dev/null \
-              | grep -oE 'platforms;android-[0-9]+' \
-              | grep -oE '[0-9]+$' | sort -n | tail -1)"; \
+              | grep -oE 'platforms;android-[0-9]+(\.[0-9]+)?(-beta[0-9]+)?' \
+              | sed 's/^platforms;android-//' \
+              | sort -V | tail -1)"; \
       [ -n "$API" ] || { echo 'Could not resolve an API level'; exit 1; }; \
     else \
       API="$ANDROID_API"; \

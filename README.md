@@ -13,8 +13,13 @@ You pick the Android version and image flavour with two lines in a `.env` file.
 Client (scrcpy / Android Studio / adb)
         │   private network (Tailscale, LAN, VPN…)
         ▼
-Linux host ──► Docker container ──► qemu + KVM ──► Android system image
+Linux host ──► Docker container ──► qemu + KVM ──► official Android system image
 ```
+
+By default this ships pointed at the **latest Android** Google publishes to the
+command-line SDK — currently **Android 17 (API 37.0)**, a preview build. Pinning
+to a stable release (Android 16 / API 36) is a two-line change in `.env`; see
+[Choosing the Android version](#version-selecting-a-release).
 
 - **License:** MIT (see `LICENSE`)
 - **Status:** works on any x86_64 Linux host with KVM. See host support below.
@@ -28,7 +33,7 @@ Linux host ──► Docker container ──► qemu + KVM ──► Android sys
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
 - [Choosing the Android version and image type](#choosing-the-android-version-and-image-type)
-  - [Version: API 36 vs 37](#version-api-36-vs-37)
+  - [Version: selecting a release](#version-selecting-a-release)
   - [Flavour: Google APIs vs Google Play vs AOSP](#flavour-google-apis-vs-google-play-vs-aosp)
   - [CPU arch: x86_64 vs ARM](#cpu-arch-x86_64-vs-arm)
 - [Configuration reference](#configuration-reference)
@@ -124,9 +129,9 @@ Everything is driven by three build args, all set in `.env`:
 
 | `.env` variable | Controls | Default |
 |---|---|---|
-| `ANDROID_API` | Android **version** (API level), or `auto` for newest on the channel | `36` |
+| `ANDROID_API` | Android **version** token, or `auto` for newest on the channel | `37.0` |
 | `SYSTEM_IMAGE_TAG` | Image **flavour** (Google APIs / Play / AOSP / ATD) | `google_apis` |
-| `SDK_CHANNEL` | SDK release channel (`0` stable … `3` canary) | `0` |
+| `SDK_CHANNEL` | SDK release channel (`0` stable … `3` canary) | `3` |
 
 After changing any of them, rebuild:
 
@@ -134,19 +139,83 @@ After changing any of them, rebuild:
 docker compose build --no-cache && docker compose up -d && docker compose logs -f
 ```
 
-### Version: API 36 vs 37
+<a id="version-selecting-a-release"></a>
+### Version: selecting a release
 
-| You want | Set in `.env` | Notes |
+`ANDROID_API` must equal a platform package name **exactly as `sdkmanager` lists
+it** — specifically the part after `android-`. This is the single most common
+source of build errors, because the format differs by channel:
+
+| Channel | Package name | What you set |
 |---|---|---|
-| **Android 16 (API 36), stable** | `ANDROID_API=36` and `SDK_CHANNEL=0` | Current stable release. **Recommended.** |
-| **Newest stable, auto-detected** | `ANDROID_API=auto` and `SDK_CHANNEL=0` | Build queries the stable channel and installs the highest available. |
-| **Android 17 (API 37), preview** | `ANDROID_API=37` and `SDK_CHANNEL=3` | API 37 (Android 17 "CinnamonBun") is still a **preview**; its `x86_64` image is only on the canary channel, so `SDK_CHANNEL=0` will not find it. Expect occasional emulator quirks. |
-| **An older version** | e.g. `ANDROID_API=34` | Any level whose `google_apis x86_64` image is published works. |
+| **Stable** (`SDK_CHANNEL=0`) | `platforms;android-36` | `ANDROID_API=36` |
+| **Preview** (`SDK_CHANNEL=3`) | `platforms;android-37.0` | `ANDROID_API=37.0` |
 
-Why the channel matters: `sdkmanager` only shows stable packages by default. The
-build verifies the exact image exists on your chosen channel **before** installing,
-and if it can't find it, it prints the list of images that *are* available on that
-channel and stops — so you never get a cryptic failure.
+The rule: **copy the token after `android-` verbatim.** Stable releases use a bare
+integer (`36`); preview releases carry a minor version (`37.0`, `37.1`,
+`37.2-beta2`). Setting `ANDROID_API=37` when the package is `android-37.0` fails
+with "not found" — the build then prints the list of what *is* available so you
+can correct it.
+
+Common selections:
+
+| You want | `.env` lines |
+|---|---|
+| **Android 17 (API 37.0), preview** — *default* | `ANDROID_API=37.0` · `SDK_CHANNEL=3` |
+| **Android 16 (API 36), stable** | `ANDROID_API=36` · `SDK_CHANNEL=0` |
+| **Newest stable, auto-detected** | `ANDROID_API=auto` · `SDK_CHANNEL=0` |
+| **Newest preview, auto-detected** | `ANDROID_API=auto` · `SDK_CHANNEL=3` |
+| **A specific older release** | e.g. `ANDROID_API=34` · `SDK_CHANNEL=0` |
+
+> **Preview caveat.** Preview images (37.x) can boot slower or behave less
+> predictably than stable. For a production-like, reproducible device, pin
+> `ANDROID_API=36` with `SDK_CHANNEL=0`.
+
+The build verifies the exact image exists on your chosen channel **before**
+installing; if it can't find it, it lists the available images and stops cleanly
+rather than failing cryptically.
+
+### Checking what's available
+
+To see exactly which versions and images Google currently publishes to the
+command-line SDK — the authoritative source, and what actually determines what
+this project can install — run this one-off container. It builds a throwaway SDK
+lister in memory (nothing is saved to disk) and prints matching packages:
+
+```bash
+docker run --rm ubuntu:24.04 bash -c '
+apt-get update -qq && apt-get install -y -qq openjdk-21-jdk-headless curl unzip >/dev/null 2>&1
+cd /tmp && curl -fsSL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -o c.zip
+mkdir -p /sdk/cmdline-tools && unzip -q c.zip && mv cmdline-tools /sdk/cmdline-tools/latest
+yes | /sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/sdk --licenses >/dev/null 2>&1
+/sdk/cmdline-tools/latest/bin/sdkmanager --sdk_root=/sdk --list --channel=3 2>/dev/null \
+  | grep "system-images"
+'
+```
+
+- Change `--channel=3` to `0` to see only stable images.
+- Narrow the results by piping to a tighter `grep`, e.g. `grep "android-37"` for
+  one release, or `grep "google_apis;x86_64"` for one flavour/arch.
+- Read the **third column** of the row you want and copy the token after
+  `android-` into `ANDROID_API`, and the tag (`google_apis`,
+  `google_apis_playstore`, …) into `SYSTEM_IMAGE_TAG`.
+
+Example row and the settings it implies:
+
+```
+system-images;android-37.0;google_apis;x86_64   | 6 | Google APIs Intel x86_64 Atom System Image
+                       ^^^^  ^^^^^^^^^^  ^^^^^^
+                ANDROID_API  SYSTEM_IMAGE_TAG  ABI
+```
+
+→ `ANDROID_API=37.0`, `SYSTEM_IMAGE_TAG=google_apis`, `SDK_CHANNEL=3`.
+
+**Reference links** (human-readable, for orientation — the command above is the
+ground truth for what's installable):
+
+- Android SDK Platform release notes — <https://developer.android.com/tools/releases/platforms>
+- Android API level / version reference — <https://apilevels.com/>
+- `sdkmanager` documentation — <https://developer.android.com/tools/sdkmanager>
 
 ### Flavour: Google APIs vs Google Play vs AOSP
 
@@ -206,9 +275,9 @@ Full list of `.env` variables (see `.env.example`):
 | Variable | Default | Meaning |
 |---|---|---|
 | `BIND_ADDR` | `127.0.0.1` | Host address ADB is published on. **Set to your Tailscale/VPN/LAN IP** so remote clients can reach it. Leaving it at `127.0.0.1` keeps it host-only. |
-| `ANDROID_API` | `36` | API level, or `auto`. See [version table](#version-api-36-vs-37). |
+| `ANDROID_API` | `37.0` | Version token, or `auto`. See [version selection](#version-selecting-a-release). |
 | `SYSTEM_IMAGE_TAG` | `google_apis` | Image flavour. See [flavour table](#flavour-google-apis-vs-google-play-vs-aosp). |
-| `SDK_CHANNEL` | `0` | `0`=stable, `1`=beta, `2`=dev, `3`=canary. Needed `=3` for API 37. |
+| `SDK_CHANNEL` | `3` | `0`=stable, `1`=beta, `2`=dev, `3`=canary. Preview versions (37.x) need `3`. |
 | `DEVICE_PROFILE` | `pixel_6` | AVD hardware profile. `avdmanager list device` shows options. |
 | `RAM_MB` | `4096` | Guest RAM in MB. |
 | `CORES` | `4` | vCPUs given to the guest. |
@@ -372,7 +441,7 @@ but fragile headless — only try it after the SwiftShader path works.
 | Symptom | Fix |
 |---|---|
 | `FATAL: /dev/kvm is not present` | Enable VT-x/AMD-V in BIOS; check `kvm-ok`; confirm `devices: ["/dev/kvm"]` in compose. |
-| Build: `Failed to find package 'platforms;android-37'` | API 37 is preview-only. Set `SDK_CHANNEL=3`, or use `ANDROID_API=36`. |
+| Build: `Failed to find package 'platforms;android-37'` | Preview releases carry a minor version. Use `ANDROID_API=37.0` (not `37`) with `SDK_CHANNEL=3`; run the ["Checking what's available"](#checking-whats-available) command to see the exact token. |
 | Build: `'…google_apis;x86_64' not found on channel N` | The version/flavour/channel combo isn't published. The log lists what *is* available — pick from that. |
 | `adb connect` hangs or flaps | adbd allows one adb server at a time. Run `adb disconnect` everywhere; don't run `adb` inside the container while a client is attached. |
 | Device shows `offline` | `adb disconnect && adb kill-server && adb connect <host>:5555`. |

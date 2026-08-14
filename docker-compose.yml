@@ -4,11 +4,12 @@ services:
       context: .
       args:
         # 'auto' = newest stable API. Or pin a number, e.g. 36 (Android 16).
-        ANDROID_API: "${ANDROID_API:-auto}"
+        # Default: Android 17 (API 37.0) preview. See README to pin stable.
+        ANDROID_API: "${ANDROID_API:-37.0}"
         SYSTEM_IMAGE_TAG: "${SYSTEM_IMAGE_TAG:-google_apis}"
         ABI: "x86_64"
-        SDK_CHANNEL: "${SDK_CHANNEL:-0}"
-    image: homelab/android-emulator:${ANDROID_API:-auto}
+        SDK_CHANNEL: "${SDK_CHANNEL:-3}"
+    image: homelab/android-emulator:${ANDROID_API:-37.0}
     container_name: android-emulator
     devices:
       - /dev/kvm
