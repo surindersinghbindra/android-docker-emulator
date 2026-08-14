@@ -44,7 +44,12 @@ to a stable release (Android 16 / API 36) is a two-line change in `.env`; see
 - [Host setup by platform](#host-setup-by-platform)
 - [Verifying the image is genuinely Google's](#verifying-the-image-is-genuinely-googles)
 - [Performance tuning](#performance-tuning)
+  - [Reading CPU% correctly](#reading-cpu-correctly)
+  - [The two resource layers](#the-two-resource-layers-important)
+  - [If the emulator is slow](#if-the-emulator-is-slow)
+- [Docker command reference](#docker-command-reference)
 - [Troubleshooting](#troubleshooting)
+  - [Fixing a crash loop](#fixing-a-crash-loop)
 - [Security notes](#security-notes)
 - [FAQ](#faq)
 - [Contributing](#contributing)
@@ -422,17 +427,154 @@ docker compose exec android-emulator \
 
 ## Performance tuning
 
-| Knob | Suggested | Why |
+| Knob (`.env`) | Suggested | Why |
 |---|---|---|
-| `RAM_MB` | `4096` | On a 16 GB host, 4 GB guest + ~1.5 GB qemu overhead leaves headroom. |
-| `CORES` | `4` | On a 6-core CPU, leave 2 for the host and other containers. |
+| `RAM_MB` | `4096` | Guest RAM. On a 16 GB host, 4 GB + ~1.3 GB overhead leaves headroom. |
+| `CORES` | `4` | Guest vCPUs. On a 6-core CPU, leave 1–2 for the host. |
+| `MEM_LIMIT` | `8g` | Outer cgroup memory ceiling. Keep it **well above** `RAM_MB` + ~1.3 GB. |
+| `CPU_LIMIT` | `5` | Outer cgroup CPU ceiling. Leave at least one core for the host. |
 | `GPU_MODE` | `swiftshader_indirect` | Software GL — the reliable choice on a headless server. |
-| `SYSTEM_IMAGE_TAG` | `google_atd` | Swap in for CI/instrumentation: boots ~2× faster, ~40% lighter. |
+| `SYSTEM_IMAGE_TAG` | `google_atd` | Swap in for CI/instrumentation: boots ~2× faster, much lighter. |
 
 **Expectation:** with SwiftShader you get a smooth-enough UI for app development,
-testing, and CI (~15–30 fps for normal Compose/View UIs). It's not for 3D games or
-GPU benchmarking. Hardware GL (`GPU_MODE=host` + mounting `/dev/dri`) is possible
-but fragile headless — only try it after the SwiftShader path works.
+testing, and CI (~15–30 fps for normal Compose/View UIs). It is CPU-rendered, so it
+will never match a hardware-accelerated simulator on a laptop, and it's not for 3D
+games or GPU benchmarking. Hardware GL (`GPU_MODE=host` + mounting `/dev/dri`) is
+possible but fragile headless — only try it after the SwiftShader path works.
+
+### Reading CPU% correctly
+
+In `docker stats`, **100% = one full CPU core.** On a 6-core host the ceiling is
+600%. So `212%` means the emulator is using ~2.1 cores spread across the scheduler's
+choice of cores — it is *not* one core maxed out. A headless SwiftShader emulator
+normally wants 1–2 cores while active and drops to near-idle once booted.
+
+### The two resource layers (important)
+
+The container has an **outer** limit (Docker cgroup: `CPU_LIMIT`, `MEM_LIMIT`) and an
+**inner** footprint (the emulator's own `RAM_MB` + `CORES`). They must agree:
+
+- `MEM_LIMIT` must stay **above** `RAM_MB` + ~1.3 GB QEMU/SwiftShader overhead.
+  If the cap sits right at what the guest needs, Android thrashes (constant paging/GC),
+  which *looks* like high CPU but is really memory starvation. Symptom: memory pegged
+  near the cap (e.g. `4.1GiB / 4.5GiB`) **and** CPU above the CPU cap at the same time.
+- If `MEM_LIMIT` is set **below** what the guest needs, Docker's OOM killer terminates
+  the emulator mid-boot and `restart: unless-stopped` loops it forever.
+
+### If the emulator is slow
+
+Work down this list:
+
+1. **Check whether it's starved, not throttled.** Run `docker stats android-emulator`.
+   If memory is pinned near `MEM_LIMIT`, it's thrashing — **raise the cap**, don't lower RAM:
+   ```bash
+   docker update --cpus 5 --memory 8g --memory-swap 8g android-emulator
+   ```
+   This is live (no recreate). Make it permanent in `.env`:
+   ```bash
+   sed -i '/^RAM_MB=/d;/^CORES=/d;/^MEM_LIMIT=/d;/^CPU_LIMIT=/d' .env
+   printf 'RAM_MB=4096\nCORES=4\nMEM_LIMIT=8g\nCPU_LIMIT=5\n' >> .env
+   docker compose up -d --force-recreate android-emulator
+   ```
+
+2. **Don't over-cap CPU.** A `cpus:2` limit chokes an emulator that wants ~2 cores.
+   Give it `CPU_LIMIT=5` on a 6-core host — leave one core for the host and let it
+   breathe. Other idle containers (databases, HA, n8n) use ~0% and need no protection.
+
+3. **Confirm settings actually applied.** The startup log line must match your `.env`:
+   ```
+   >> Starting emulator (headless … ram=4096M, cores=4)
+   ```
+   If it shows old numbers, the container wasn't recreated — use
+   `docker compose up -d --force-recreate android-emulator` (a bare `docker restart`
+   keeps the old settings).
+
+4. **Switch to a lighter image.** The biggest single speedup on a headless host is the
+   ATD image, which strips the launcher, UI apps, and animations:
+   ```bash
+   sed -i 's/^SYSTEM_IMAGE_TAG=.*/SYSTEM_IMAGE_TAG=google_atd/' .env
+   docker compose build && docker compose up -d --force-recreate android-emulator
+   ```
+   Trade-off: no Play Store, bare UI — fine for automation/logic/UI testing.
+
+5. **Pin cores to avoid contention (optional).** If you *do* run other CPU-hungry
+   containers, uncomment `cpuset` in `docker-compose.yml` to keep the emulator on
+   specific cores rather than competing for all of them.
+
+### Do the limits protect other containers?
+
+Only if something is actually competing. Check with `docker stats` — if every other
+container sits near 0% CPU (the common case), the emulator is not starving them, and a
+loose ceiling (`CPU_LIMIT=5`, `MEM_LIMIT=8g`) is purely a safety rail against runaway
+behaviour, not a throttle you need for day-to-day use.
+
+---
+
+## Docker command reference
+
+Common operations for this project. Run them from the project folder (where
+`docker-compose.yml` lives).
+
+**Lifecycle — recreate vs restart vs rebuild** (the distinction matters):
+
+| Goal | Command | Rebuilds image? | Picks up `.env` changes? |
+|---|---|---|---|
+| Apply `.env` / compose changes, reuse built image | `docker compose up -d --force-recreate android-emulator` | No | **Yes** |
+| Stop + remove container, keep AVD, then start | `docker compose down` then `docker compose up -d` | No | Yes |
+| Just restart the same container | `docker restart android-emulator` | No | **No** (keeps old settings) |
+| Stop / start without removing | `docker compose stop` / `docker compose start` | No | No |
+
+**Building images:**
+
+```bash
+# Normal build — reuses cached layers (fast; re-run after editing the Dockerfile)
+docker compose build
+
+# Force a clean build — ignore the layer cache (use after changing ANDROID_API,
+# SYSTEM_IMAGE_TAG, SDK_CHANNEL, or when a download looks stale/corrupt)
+docker compose build --no-cache
+
+# Build then start in one go
+docker compose up -d --build
+```
+
+> Rule of thumb: change something in `.env` that's only an **environment** value
+> (`RAM_MB`, `CORES`, `MEM_LIMIT`, `BIND_ADDR`) → just `--force-recreate`, no build.
+> Change a **build arg** (`ANDROID_API`, `SYSTEM_IMAGE_TAG`, `SDK_CHANNEL`) → rebuild,
+> and use `--no-cache` so the SDK step re-resolves the version.
+
+**Live resource limits (no recreate):**
+
+```bash
+docker update --cpus 5 --memory 8g --memory-swap 8g android-emulator
+docker stats android-emulator          # watch CPU / mem live (Ctrl-C to exit)
+```
+
+**Logs and inspection:**
+
+```bash
+docker compose logs -f                  # follow live (wait for ">> BOOT COMPLETE")
+docker compose logs --tail=50           # last 50 lines
+docker compose ps                       # status of the service
+docker exec -it android-emulator bash   # shell inside the container
+docker exec android-emulator getprop sys.boot_completed   # 1 = booted
+```
+
+**AVD / volume management:**
+
+```bash
+docker volume ls | grep avd             # find the AVD volume name
+docker compose down                     # remove container, KEEP the AVD volume
+docker compose down -v                  # remove container AND wipe the AVD (clean device)
+```
+
+**Cleanup (reclaim disk):**
+
+```bash
+docker image prune                      # remove dangling images
+docker image rm homelab/android-emulator:37.0   # remove this project's image
+docker builder prune                    # clear the build cache
+```
 
 ---
 
@@ -445,10 +587,44 @@ but fragile headless — only try it after the SwiftShader path works.
 | Build: `'…google_apis;x86_64' not found on channel N` | The version/flavour/channel combo isn't published. The log lists what *is* available — pick from that. |
 | `adb connect` hangs or flaps | adbd allows one adb server at a time. Run `adb disconnect` everywhere; don't run `adb` inside the container while a client is attached. |
 | Device shows `offline` | `adb disconnect && adb kill-server && adb connect <host>:5555`. |
-| Boot never completes | `docker compose logs -f`; if the host is swapping, lower `RAM_MB` to `3072`. |
+| Boot never completes | `docker compose logs -f`; if the host is swapping, raise `MEM_LIMIT` (don't lower `RAM_MB` — see [Performance](#performance-tuning)). |
+| `FATAL: A snapshot operation … timeout has expired` then restart loop | A stale/corrupt Quick Boot snapshot. Stop the container, wipe snapshots + locks, and disable snapshots. See [Fixing a crash loop](#fixing-a-crash-loop). |
+| `FATAL: Running multiple emulators with the same AVD` | Stale AVD lock from a previous run. Stop the container and delete `*.lock` from the AVD dir — see [Fixing a crash loop](#fixing-a-crash-loop). |
+| Container restarts endlessly (`exited with code 1 (restarting)`) | `restart: unless-stopped` is respinning a failing boot. Read the FATAL line just above each restart; usually snapshot/lock (above) or OOM (raise `MEM_LIMIT`). |
+| Emulator slow; memory pinned near `MEM_LIMIT` + CPU above cap | Memory thrash, not CPU. Raise the cap: `docker update --cpus 5 --memory 8g --memory-swap 8g android-emulator`. See [If the emulator is slow](#if-the-emulator-is-slow). |
+| Startup log shows old `ram=…/cores=…` after an `.env` change | Container wasn't recreated. Use `docker compose up -d --force-recreate` — `docker restart` keeps old settings. |
+| Flood of `socat … 127.0.0.1:5555 Connection refused` at startup | Harmless. socat is bridging the ADB port before the emulator has opened it; the errors stop once boot completes. Only a concern if they persist *after* `BOOT COMPLETE`. |
 | Reachable from LAN unexpectedly | `BIND_ADDR` isn't your private IP. Check `ss -ltnp \| grep 5555`. |
 | Want a clean device | `docker compose down -v && docker compose up -d` (wipes the AVD volume). |
 | `unauthorized` device state | Emulator images normally allow unauthenticated ADB. If you hit this, mount your client's `~/.android/adbkey.pub` into the container at `/home/android/.android/adbkey.pub` and restart. |
+
+### Fixing a crash loop
+
+A stuck snapshot or stale lock makes the emulator die and respin forever. Break it by
+stopping the container, clearing the offending files from the AVD volume, and (for
+snapshots) launching with `-no-snapshot` so it never touches them:
+
+```bash
+cd /opt/docker/<you>/android-docker-emulator
+
+# 1. stop the loop
+docker compose stop android-emulator
+
+# 2. find the volume name, then wipe snapshots + locks inside it
+docker volume ls | grep avd
+docker run --rm -v <project>_avd-data:/a alpine sh -c '
+  rm -rf /a/avd/<AVD_NAME>.avd/snapshots/* ;
+  rm -f  /a/avd/<AVD_NAME>.avd/*.lock ;
+  echo cleared'
+
+# 3. recreate (no rebuild)
+docker compose up -d --force-recreate android-emulator
+docker compose logs -f
+```
+
+Replace `<project>_avd-data` with what `docker volume ls` prints, and `<AVD_NAME>`
+with your AVD (e.g. `homelab_api37.0`). This project already launches the emulator
+with `-no-snapshot`, so a fresh cold boot is expected after wiping.
 
 ---
 

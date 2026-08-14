@@ -85,6 +85,7 @@ exec emulator "@${AVD_NAME}" \
   -no-window \
   -no-audio \
   -no-boot-anim \
+  -no-snapshot \
   -no-metrics \
   -gpu "${GPU_MODE}" \
   -memory "${RAM_MB}" \
